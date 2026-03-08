@@ -1,20 +1,18 @@
 // =============================================================
-// craquelure_organique.jsx  –  v5  (Organic Voronoï)
+// craquelure_organique.jsx  –  v6  (Organic Voronoï – single edges)
 //
-// Generates a network of Voronoï cells clipped to the drawing
-// bounding box. Edges are organically curved (Bézier wobble),
-// cell sizes vary randomly for a natural craquelure look.
+// Generates a Voronoï crack network clipped to the drawing
+// bounding box. Each edge is drawn ONCE (no double lines).
+// Edges are organically curved via deterministic Bézier wobble.
 //
 // Usage : File > Scripts > Other Script… > craquelure_organique.jsx
 // =============================================================
 
 // -------- PARAMÈTRES --------
-var CELL_SIZE_MIN = 25;   // Taille minimum des cellules (pt)
-var CELL_SIZE_MAX = 65;   // Taille maximum des cellules (pt)
-var CELL_SIZE_AVG = 40;   // Taille moyenne pour la grille de base
+var CELL_SIZE_AVG = 40;   // Taille moyenne pour la grille de base (pt)
 var SEED_REMOVAL  = 0.30; // Fraction de graines supprimées (0-1) pour varier les tailles
 var JITTER        = 0.65; // Perturbation aléatoire (0 = grille pure, 1 = max chaos)
-var WOBBLE_AMP    = 0.30; // Amplitude des courbes organiques (fraction de la longueur du segment)
+var WOBBLE_AMP    = 0.25; // Amplitude des courbes organiques (fraction de la longueur du segment)
 var WOBBLE_SUBDIV = 2;    // Subdivisions par arête (plus = plus de courbes)
 var STROKE_R      = 100;
 var STROKE_G      = 180;
@@ -28,6 +26,50 @@ if (app.documents.length === 0) {
     alert("Aucun document ouvert.");
 } else {
     main();
+}
+
+// ============================================================
+// Simple seeded pseudo-random number generator (LCG)
+// Compatible with ExtendScript (ES3). Returns a function
+// that produces deterministic values in [0,1).
+// ============================================================
+function seededRandom(seed) {
+    var s = Math.abs(seed | 0) + 1;
+    return function() {
+        // Linear congruential generator (Numerical Recipes)
+        s = (s * 1664525 + 1013904223) & 0x7FFFFFFF;
+        return s / 0x7FFFFFFF;
+    };
+}
+
+// ============================================================
+// Generate a deterministic hash from two 2D points (edge endpoints).
+// We round coordinates to avoid floating-point mismatch, and
+// always order the two points the same way so A→B == B→A.
+// ============================================================
+function edgeKey(ax, ay, bx, by) {
+    // Round to 2 decimal places to avoid float issues
+    var x1 = Math.round(ax * 100);
+    var y1 = Math.round(ay * 100);
+    var x2 = Math.round(bx * 100);
+    var y2 = Math.round(by * 100);
+
+    // Canonical order: smaller x first, then smaller y
+    if (x1 > x2 || (x1 === x2 && y1 > y2)) {
+        var tmp;
+        tmp = x1; x1 = x2; x2 = tmp;
+        tmp = y1; y1 = y2; y2 = tmp;
+    }
+    return x1 + "," + y1 + "," + x2 + "," + y2;
+}
+
+// Deterministic seed from an edge key string
+function hashString(str) {
+    var h = 0;
+    for (var i = 0; i < str.length; i++) {
+        h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+    }
+    return h;
 }
 
 // ============================================================
@@ -78,13 +120,11 @@ function main() {
         craqLayer.name = LAYER_NAME;
     }
 
-    // Must unlock/show BEFORE zOrder — locked layers cannot be reordered
     var wasLocked  = craqLayer.locked;
     var wasVisible = craqLayer.visible;
     craqLayer.locked  = false;
     craqLayer.visible = true;
 
-    // Bring to front (skip if layer is already at position 0 = topmost)
     if (doc.layers.length > 1 && doc.layers[0] !== craqLayer) {
         craqLayer.zOrder(ZOrderMethod.BRINGTOFRONT);
     }
@@ -93,14 +133,11 @@ function main() {
     }
 
     // --- Seed grid with variable density ---
-    // Base grid at CELL_SIZE_AVG, then randomly remove seeds + add extra jitter
-    var pad  = CELL_SIZE_MAX * 2;
+    var pad  = CELL_SIZE_AVG * 3;
     var cols = Math.ceil((W + 2 * pad) / CELL_SIZE_AVG) + 1;
     var rows = Math.ceil((H + 2 * pad) / CELL_SIZE_AVG) + 1;
     var seeds = [];
 
-    // Build a 2D grid index for fast neighbor lookup
-    // Because we remove seeds, grid cells can be null
     var grid = [];
     for (var gr = 0; gr < rows; gr++) {
         grid[gr] = [];
@@ -111,16 +148,13 @@ function main() {
 
     for (var row = 0; row < rows; row++) {
         for (var col = 0; col < cols; col++) {
-            // Random removal for size variation (but keep border seeds)
             var isBorder = (row <= 1 || row >= rows - 2 || col <= 1 || col >= cols - 2);
             if (!isBorder && Math.random() < SEED_REMOVAL) {
-                continue; // skip → neighbor cells will grow larger
+                continue;
             }
 
             var bx = xMin - pad + col * CELL_SIZE_AVG;
             var by = yMin - pad + row * CELL_SIZE_AVG;
-
-            // Variable jitter: random between CELL_SIZE_MIN and CELL_SIZE_MAX influence
             var jitterScale = CELL_SIZE_AVG * JITTER;
             var sx = bx + (Math.random() - 0.5) * 2 * jitterScale;
             var sy = by + (Math.random() - 0.5) * 2 * jitterScale;
@@ -131,9 +165,7 @@ function main() {
         }
     }
 
-    // Build flat list of seeds with grid coordinates for neighbor lookup
-    // Since some grid cells are null, we need a wider search radius
-    var GRID_SEARCH = 4; // wider because of removed seeds
+    var GRID_SEARCH = 4;
 
     // --- Build stroke color once ---
     var strokeCol = new RGBColor();
@@ -142,15 +174,18 @@ function main() {
     strokeCol.blue  = STROKE_B;
 
     var grp = craqLayer.groupItems.add();
-    var cellCount = 0;
 
     // Big initial polygon for each cell
     var BIG = (W + H) * 2;
 
+    // ============================================================
+    // PHASE 1: Compute all Voronoï cells (as polygon vertex arrays)
+    // ============================================================
+    var cells = [];
+
     for (var si = 0; si < seeds.length; si++) {
         var s = seeds[si];
 
-        // Start with a large bounding square centred on the seed
         var poly = [
             { x: s.x - BIG, y: s.y - BIG },
             { x: s.x + BIG, y: s.y - BIG },
@@ -158,7 +193,6 @@ function main() {
             { x: s.x - BIG, y: s.y + BIG }
         ];
 
-        // --- Clip by half-plane for each neighbour seed ---
         var rMin = Math.max(0, s.row - GRID_SEARCH);
         var rMax = Math.min(rows - 1, s.row + GRID_SEARCH);
         var cMin = Math.max(0, s.col - GRID_SEARCH);
@@ -168,7 +202,7 @@ function main() {
             for (var nc = cMin; nc <= cMax; nc++) {
                 if (nr === s.row && nc === s.col) continue;
                 var nb = grid[nr][nc];
-                if (!nb) continue; // removed seed
+                if (!nb) continue;
 
                 var dx = nb.x - s.x;
                 var dy = nb.y - s.y;
@@ -181,31 +215,61 @@ function main() {
             if (poly.length < 3) break;
         }
 
-        if (poly.length < 3) continue;
+        if (poly.length < 3) { cells.push(null); continue; }
 
-        // --- Clip against drawing bounding box using 4 explicit half-planes ---
-        poly = clipHalfPlane(poly, xMin, 0,    -1,  0);   // left
-        if (poly.length >= 3) poly = clipHalfPlane(poly, xMax, 0,     1,  0);   // right
-        if (poly.length >= 3) poly = clipHalfPlane(poly, 0,    yMin,  0, -1);   // bottom
-        if (poly.length >= 3) poly = clipHalfPlane(poly, 0,    yMax,  0,  1);   // top
+        // Clip against drawing bounding box
+        poly = clipHalfPlane(poly, xMin, 0,    -1,  0);
+        if (poly.length >= 3) poly = clipHalfPlane(poly, xMax, 0,     1,  0);
+        if (poly.length >= 3) poly = clipHalfPlane(poly, 0,    yMin,  0, -1);
+        if (poly.length >= 3) poly = clipHalfPlane(poly, 0,    yMax,  0,  1);
 
-        if (poly.length < 3) continue;
+        if (poly.length < 3) { cells.push(null); continue; }
 
-        // --- Draw closed polygon with organic curves ---
-        drawOrganicPolygon(grp, poly, strokeCol);
-        cellCount++;
+        cells.push(poly);
+    }
+
+    // ============================================================
+    // PHASE 2: Extract unique edges from all cells, deduplicate
+    // ============================================================
+    var drawnEdges = {};  // key → true (already drawn)
+    var edgeCount = 0;
+
+    for (var ci = 0; ci < cells.length; ci++) {
+        var cell = cells[ci];
+        if (!cell) continue;
+
+        var nv = cell.length;
+        for (var ei = 0; ei < nv; ei++) {
+            var ea = cell[ei];
+            var eb = cell[(ei + 1) % nv];
+
+            var key = edgeKey(ea.x, ea.y, eb.x, eb.y);
+
+            if (drawnEdges[key]) continue;  // already drawn by neighbor cell
+            drawnEdges[key] = true;
+
+            // Draw this edge once, with deterministic wobble
+            drawOrganicEdge(grp, ea, eb, strokeCol, key);
+            edgeCount++;
+        }
     }
 
     craqLayer.locked  = wasLocked;
     craqLayer.visible = wasVisible;
 
+    var cellCount = 0;
+    for (var cc = 0; cc < cells.length; cc++) {
+        if (cells[cc]) cellCount++;
+    }
+
     alert(
-        "Craquelures v5 generees !\n\n" +
-        "  " + cellCount + " cellules dessinees\n" +
+        "Craquelures v6 generees !\n\n" +
+        "  " + cellCount + " cellules\n" +
+        "  " + edgeCount + " aretes uniques dessinees\n" +
         "  Grille " + cols + " x " + rows + " (" + seeds.length + " graines actives)\n" +
         "  Zone dessin: [" + Math.round(xMin) + ", " + Math.round(yMin) +
                        ", " + Math.round(xMax) + ", " + Math.round(yMax) + "]\n\n" +
-        "Ajustez CELL_SIZE_MIN/MAX, SEED_REMOVAL, WOBBLE_AMP pour varier le rendu."
+        "Ajustez CELL_SIZE_AVG, SEED_REMOVAL, WOBBLE_AMP pour varier le rendu."
     );
 }
 
@@ -229,8 +293,6 @@ function getDrawingBounds(doc) {
             var item = lay.pageItems[pi];
             if (item.hidden) continue;
 
-            // geometricBounds = [left, top, right, bottom]
-            // In Illustrator: top > bottom (Y goes up)
             var gb = item.geometricBounds;
             var iLeft   = gb[0];
             var iTop    = gb[1];
@@ -252,18 +314,11 @@ function getDrawingBounds(doc) {
     }
 
     if (!hasContent) return null;
-
     return { xMin: bxMin, yMin: byMin, xMax: bxMax, yMax: byMax };
 }
 
 // ============================================================
 // SUTHERLAND-HODGMAN — clip polygon against a single half-plane
-//
-// Half-plane defined by:
-//   A point M = (mx, my) on the boundary line
-//   An outward normal (nx, ny) pointing toward the EXCLUDED side
-//
-// "Inside" = dot(p - M, N) <= 0
 // ============================================================
 function clipHalfPlane(poly, mx, my, nx, ny) {
     var output = [];
@@ -295,89 +350,76 @@ function clipHalfPlane(poly, mx, my, nx, ny) {
 }
 
 // ============================================================
-// Draw a closed polygon with ORGANIC Bézier curves
+// Draw a SINGLE edge as an organic Bézier curve.
 //
-// Strategy: for each edge of the polygon, subdivide into
-// WOBBLE_SUBDIV segments and add random perpendicular offset
-// to the Bézier control handles. This creates wavy, natural-
-// looking edges while keeping vertices connected.
+// Uses a deterministic PRNG seeded from the edge key so
+// the same edge always gets the same wobble — no double lines.
 // ============================================================
-function drawOrganicPolygon(container, poly, strokeCol) {
-    var nVerts = poly.length;
-    if (nVerts < 3) return;
+function drawOrganicEdge(container, ptA, ptB, strokeCol, key) {
+    var edgeLen = Math.sqrt((ptB.x - ptA.x) * (ptB.x - ptA.x) + (ptB.y - ptA.y) * (ptB.y - ptA.y));
 
-    // Build the full list of points: subdivide each edge
-    var allPts = []; // each entry: {x, y, isVertex}
+    // Determine subdivisions based on edge length
+    var subdiv = WOBBLE_SUBDIV;
+    if (edgeLen < 8)  subdiv = 0;
+    else if (edgeLen < 20) subdiv = 1;
 
-    for (var i = 0; i < nVerts; i++) {
-        var a = poly[i];
-        var b = poly[(i + 1) % nVerts];
+    // Deterministic random from edge key
+    var rng = seededRandom(hashString(key));
 
-        var edgeLen = Math.sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
-
-        // Determine how many subdivisions based on edge length
-        var subdiv = WOBBLE_SUBDIV;
-        if (edgeLen < 8) subdiv = 0;       // very short edges: no subdivision
-        else if (edgeLen < 20) subdiv = 1;  // short edges: 1 subdivision
-
-        // Push the starting vertex
-        allPts.push({ x: a.x, y: a.y, isVertex: true, edgeLen: edgeLen });
-
-        // Push intermediate subdivision points (not the last one = next vertex)
-        for (var s = 1; s <= subdiv; s++) {
-            var t = s / (subdiv + 1);
-            var mx = a.x + t * (b.x - a.x);
-            var my = a.y + t * (b.y - a.y);
-
-            // Add random perpendicular offset for organic feel
-            var perpX = -(b.y - a.y);
-            var perpY =  (b.x - a.x);
-            var perpLen = Math.sqrt(perpX * perpX + perpY * perpY);
-            if (perpLen > 0.001) {
-                perpX /= perpLen;
-                perpY /= perpLen;
-            }
-
-            // Random offset: amplitude proportional to edge length
-            var amp = edgeLen * WOBBLE_AMP / (subdiv + 1);
-            var offset = (Math.random() - 0.5) * 2 * amp;
-
-            mx += perpX * offset;
-            my += perpY * offset;
-
-            allPts.push({ x: mx, y: my, isVertex: false, edgeLen: edgeLen });
-        }
+    // Perpendicular direction
+    var perpX = -(ptB.y - ptA.y);
+    var perpY =  (ptB.x - ptA.x);
+    var perpLen = Math.sqrt(perpX * perpX + perpY * perpY);
+    if (perpLen > 0.001) {
+        perpX /= perpLen;
+        perpY /= perpLen;
     }
 
-    // Now draw the path with smooth Bézier handles at subdivision points
-    // and corner handles at original vertices
+    // Build list of points along the edge
+    var pts = [];
+    pts.push({ x: ptA.x, y: ptA.y });
+
+    for (var s = 1; s <= subdiv; s++) {
+        var t = s / (subdiv + 1);
+        var mx = ptA.x + t * (ptB.x - ptA.x);
+        var my = ptA.y + t * (ptB.y - ptA.y);
+
+        var amp = edgeLen * WOBBLE_AMP / (subdiv + 1);
+        var offset = (rng() - 0.5) * 2 * amp;
+
+        mx += perpX * offset;
+        my += perpY * offset;
+
+        pts.push({ x: mx, y: my });
+    }
+
+    pts.push({ x: ptB.x, y: ptB.y });
+
+    // Draw the path
     var path = container.pathItems.add();
     path.stroked     = true;
     path.filled      = false;
     path.strokeWidth = STROKE_WIDTH;
     path.strokeColor = strokeCol;
-    path.closed      = true;
+    path.closed      = false;  // open path — single edge, not a polygon
 
-    var nPts = allPts.length;
+    var nPts = pts.length;
 
     for (var pi = 0; pi < nPts; pi++) {
         var pp = path.pathPoints.add();
-        var pt = [allPts[pi].x, allPts[pi].y];
+        var pt = [pts[pi].x, pts[pi].y];
         pp.anchor = pt;
 
-        if (allPts[pi].isVertex) {
-            // Original polygon vertex: slight smooth handles for organic corners
-            // Compute handle direction from prev to next point
-            var prevIdx = (pi - 1 + nPts) % nPts;
-            var nextIdx = (pi + 1) % nPts;
-            var prev = allPts[prevIdx];
-            var next = allPts[nextIdx];
+        if (pi === 0 || pi === nPts - 1) {
+            // Endpoints: smooth handles toward the interior
+            var neighborIdx = (pi === 0) ? 1 : nPts - 2;
+            var nb = pts[neighborIdx];
 
-            var handleLen = Math.min(allPts[pi].edgeLen * 0.15, 8);
-            // Smooth handle direction: from prev toward next
-            var hx = next.x - prev.x;
-            var hy = next.y - prev.y;
+            var hx = nb.x - pt[0];
+            var hy = nb.y - pt[1];
             var hLen = Math.sqrt(hx * hx + hy * hy);
+            var handleLen = Math.min(hLen * 0.3, 10);
+
             if (hLen > 0.001) {
                 hx = hx / hLen * handleLen;
                 hy = hy / hLen * handleLen;
@@ -386,25 +428,26 @@ function drawOrganicPolygon(container, poly, strokeCol) {
                 hy = 0;
             }
 
-            pp.leftDirection  = [pt[0] - hx, pt[1] - hy];
-            pp.rightDirection = [pt[0] + hx, pt[1] + hy];
-            pp.pointType      = PointType.SMOOTH;
+            if (pi === 0) {
+                pp.leftDirection  = pt;  // no handle on the outside
+                pp.rightDirection = [pt[0] + hx, pt[1] + hy];
+            } else {
+                pp.leftDirection  = [pt[0] - hx, pt[1] - hy];
+                pp.rightDirection = pt;  // no handle on the outside
+            }
+            pp.pointType = PointType.SMOOTH;
         } else {
-            // Subdivision point: smooth Bézier with organic handles
-            var prevIdx2 = (pi - 1 + nPts) % nPts;
-            var nextIdx2 = (pi + 1) % nPts;
-            var prev2 = allPts[prevIdx2];
-            var next2 = allPts[nextIdx2];
+            // Interior subdivision point: smooth Bézier
+            var prev = pts[pi - 1];
+            var next = pts[pi + 1];
 
-            // Handle length proportional to distance to neighbors
-            var dPrev = Math.sqrt((pt[0] - prev2.x) * (pt[0] - prev2.x) + (pt[1] - prev2.y) * (pt[1] - prev2.y));
-            var dNext = Math.sqrt((pt[0] - next2.x) * (pt[0] - next2.x) + (pt[1] - next2.y) * (pt[1] - next2.y));
+            var dPrev = Math.sqrt((pt[0] - prev.x) * (pt[0] - prev.x) + (pt[1] - prev.y) * (pt[1] - prev.y));
+            var dNext = Math.sqrt((pt[0] - next.x) * (pt[0] - next.x) + (pt[1] - next.y) * (pt[1] - next.y));
             var handleL = Math.min(dPrev * 0.35, 12);
             var handleR = Math.min(dNext * 0.35, 12);
 
-            // Direction: smooth spline through prev → current → next
-            var shx = next2.x - prev2.x;
-            var shy = next2.y - prev2.y;
+            var shx = next.x - prev.x;
+            var shy = next.y - prev.y;
             var shLen = Math.sqrt(shx * shx + shy * shy);
             if (shLen > 0.001) {
                 shx /= shLen;
