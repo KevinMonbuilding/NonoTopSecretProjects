@@ -77,12 +77,17 @@ function main() {
         craqLayer = doc.layers.add();
         craqLayer.name = LAYER_NAME;
     }
-    craqLayer.zOrder(ZOrderMethod.BRINGTOFRONT);
 
+    // Must unlock/show BEFORE zOrder — locked layers cannot be reordered
     var wasLocked  = craqLayer.locked;
     var wasVisible = craqLayer.visible;
     craqLayer.locked  = false;
     craqLayer.visible = true;
+
+    // Bring to front (skip if layer is already at position 0 = topmost)
+    if (doc.layers.length > 1 && doc.layers[0] !== craqLayer) {
+        craqLayer.zOrder(ZOrderMethod.BRINGTOFRONT);
+    }
     while (craqLayer.pageItems.length > 0) {
         craqLayer.pageItems[0].remove();
     }
