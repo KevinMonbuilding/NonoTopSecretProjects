@@ -8,14 +8,15 @@
 
 // ------- PARAMETRES (modifiez ces valeurs selon vos besoins) -------
 
-var NUM_POINTS   = 400;    // Nombre de points de base (densité du réseau)
-var MAX_DIST     = 70;     // Distance max (en pt) entre deux points pour les relier
-var STROKE_R     = 100;    // Couleur trait - Rouge  (0-255)
-var STROKE_G     = 180;    // Couleur trait - Vert   (0-255)
-var STROKE_B     = 220;    // Couleur trait - Bleu   (0-255)
-var STROKE_WIDTH = 0.5;    // Épaisseur du trait (en pt)
-var CURVE_NOISE  = 12;     // Amplitude de déformation des courbes de Bézier (en pt)
-var LAYER_NAME   = "Craquelures"; // Nom du layer créé
+var NUM_POINTS    = 600;   // Nombre de points (densité du réseau)
+var CELL_SIZE     = 40;    // Taille approximative des cellules en pt (~14mm sur A4)
+var MAX_NEIGHBORS = 3;     // Nombre max de voisins auxquels relier chaque point
+var STROKE_R      = 100;   // Couleur trait - Rouge  (0-255)
+var STROKE_G      = 180;   // Couleur trait - Vert   (0-255)
+var STROKE_B      = 220;   // Couleur trait - Bleu   (0-255)
+var STROKE_WIDTH  = 0.5;   // Épaisseur du trait (en pt)
+var CURVE_NOISE   = 8;     // Amplitude de déformation des courbes de Bézier (en pt)
+var LAYER_NAME    = "Craquelures"; // Nom du layer créé
 
 // -------------------------------------------------------------------
 
@@ -29,25 +30,18 @@ function main() {
     var doc = app.activeDocument;
 
     // --- Dimensions de l'artboard actif ---
-    // On utilise artboardRect plutôt que doc.width/doc.height :
-    // doc.width/height donne les dimensions globales du document,
-    // ce qui est faux si le document contient plusieurs artboards.
-    //
     // artboardRect = [left, top, right, bottom] en coordonnées Illustrator.
-    // Dans l'espace interne d'Illustrator, Y est positif vers le HAUT,
-    // donc "top" est un Y plus grand (moins négatif) que "bottom".
-    // Exemple pour un A4 : rect = [0, 0, 595, -842]
-    //   left=0, top=0, right=595, bottom=-842
-    //   W = 595 - 0   = 595  (positif ✓)
-    //   H = 0 - (-842) = 842  (positif ✓)
-    var ab   = doc.artboards[doc.artboards.getActiveArtboardIndex()];
-    var rect = ab.artboardRect;   // [left, top, right, bottom]
+    // Y positif vers le HAUT. Exemple A4 : [0, 0, 595, -842]
+    //   W = 595 - 0    = 595  (positif)
+    //   H = 0 - (-842) = 842  (positif)
+    var ab       = doc.artboards[doc.artboards.getActiveArtboardIndex()];
+    var rect     = ab.artboardRect;
     var abLeft   = rect[0];
     var abTop    = rect[1];
     var abRight  = rect[2];
     var abBottom = rect[3];
-    var W = abRight  - abLeft;    // largeur  (toujours positif)
-    var H = abTop    - abBottom;  // hauteur  (positif car top > bottom en valeur algébrique)
+    var W = abRight - abLeft;
+    var H = abTop   - abBottom;
 
     // --- Créer ou récupérer le layer "Craquelures" ---
     var craqLayer = null;
@@ -62,14 +56,10 @@ function main() {
         craqLayer.name = LAYER_NAME;
     }
 
-    // Placer le layer sous tous les autres EN PREMIER,
-    // avant de vider son contenu.
-    // Layer.zOrder(ZOrderMethod.SENDTOBACK) est l'API officielle pour ça.
+    // Placer sous tous les autres layers
     craqLayer.zOrder(ZOrderMethod.SENDTOBACK);
 
-    // Vider le layer avant régénération pour éviter l'accumulation
-    // lors de relances successives sur le même document.
-    // On sauvegarde l'état locked/visible pour le restaurer après.
+    // Vider le layer (relances successives)
     var wasLocked  = craqLayer.locked;
     var wasVisible = craqLayer.visible;
     craqLayer.locked  = false;
@@ -78,128 +68,140 @@ function main() {
         craqLayer.pageItems[0].remove();
     }
 
-    // --- Générer les points aléatoires sur l'artboard ---
-    // Les coordonnées sont en espace Illustrator :
-    //   x : de abLeft à abRight
-    //   y : de abBottom à abTop
+    // --- Générer les points en grille perturbée ---
+    // On utilise une grille régulière + perturbation aléatoire plutôt que
+    // des points purement aléatoires. Cela évite les zones vides et les
+    // zones trop denses qui produisent un résultat irrégulier visuellement.
     var pts = [];
-    for (var p = 0; p < NUM_POINTS; p++) {
-        pts.push({
-            x: abLeft   + Math.random() * W,
-            y: abBottom + Math.random() * H
-        });
-    }
+    var cols = Math.round(W / CELL_SIZE) + 2;
+    var rows = Math.round(H / CELL_SIZE) + 2;
+    var stepX = W / (cols - 1);
+    var stepY = H / (rows - 1);
+    var jitter = CELL_SIZE * 0.45; // perturbation max = 45% de la taille de cellule
 
-    // Points supplémentaires sur les 4 bords pour couvrir les marges.
-    // On les rentre d'une demi-MAX_DIST vers l'intérieur pour éviter que
-    // les handles Bézier débordent hors de l'artboard.
-    var margin = MAX_DIST * 0.5;
-    var edgeCount = Math.round(Math.sqrt(NUM_POINTS) * 2);
-    for (var e = 0; e < edgeCount; e++) {
-        var t = (e + 0.5) / edgeCount;
-        var ex = abLeft   + margin + t * (W - 2 * margin);
-        var ey = abBottom + margin + t * (H - 2 * margin);
-        pts.push({ x: ex,       y: abTop    - margin }); // bord haut
-        pts.push({ x: ex,       y: abBottom + margin }); // bord bas
-        pts.push({ x: abLeft  + margin, y: ey });         // bord gauche
-        pts.push({ x: abRight - margin, y: ey });         // bord droit
+    for (var row = 0; row < rows; row++) {
+        for (var col = 0; col < cols; col++) {
+            var x = abLeft   + col * stepX + (Math.random() - 0.5) * 2 * jitter;
+            var y = abBottom + row * stepY + (Math.random() - 0.5) * 2 * jitter;
+            // Clamp dans l'artboard
+            x = Math.max(abLeft, Math.min(abRight, x));
+            y = Math.max(abBottom, Math.min(abTop, y));
+            pts.push({ x: x, y: y });
+        }
     }
 
     var totalPts = pts.length;
 
-    // --- Créer le groupe dans le layer ---
-    var grp = craqLayer.groupItems.add();
+    // --- Construire le graphe de voisinage ---
+    // Pour chaque point, on trouve ses MAX_NEIGHBORS plus proches voisins
+    // et on trace une courbe vers chacun.
+    // On stocke les arêtes déjà tracées pour éviter les doublons.
+    var drawn = {};
 
-    // --- Relier les points proches par des courbes de Bézier ---
-    // j = i+1 : chaque paire traitée une seule fois (pas de doublons A→B / B→A)
+    var grp = craqLayer.groupItems.add();
     var pathCount = 0;
 
     for (var i = 0; i < totalPts; i++) {
         var pi = pts[i];
-        for (var j = i + 1; j < totalPts; j++) {
-            var pj = pts[j];
 
+        // Calculer la distance vers tous les autres points et trier
+        var dists = [];
+        for (var j = 0; j < totalPts; j++) {
+            if (j === i) continue;
+            var dx = pts[j].x - pi.x;
+            var dy = pts[j].y - pi.y;
+            dists.push({ idx: j, d: Math.sqrt(dx * dx + dy * dy) });
+        }
+
+        // Tri par distance croissante (tri à bulles — ExtendScript n'a pas Array.sort fiable)
+        // On utilise un tri par sélection limité aux MAX_NEIGHBORS premiers éléments
+        // pour éviter un tri complet O(n²) sur tous les points.
+        for (var k = 0; k < MAX_NEIGHBORS && k < dists.length; k++) {
+            var minIdx = k;
+            for (var m = k + 1; m < dists.length; m++) {
+                if (dists[m].d < dists[minIdx].d) minIdx = m;
+            }
+            // Swap
+            var tmp = dists[k];
+            dists[k] = dists[minIdx];
+            dists[minIdx] = tmp;
+        }
+
+        // Tracer vers les MAX_NEIGHBORS voisins les plus proches
+        for (var k = 0; k < MAX_NEIGHBORS && k < dists.length; k++) {
+            var j = dists[k].idx;
+
+            // Clé unique pour éviter les doublons (A→B = B→A)
+            var key = i < j ? (i + "_" + j) : (j + "_" + i);
+            if (drawn[key]) continue;
+            drawn[key] = true;
+
+            var pj = pts[j];
             var dx = pj.x - pi.x;
             var dy = pj.y - pi.y;
-            var dist = Math.sqrt(dx * dx + dy * dy);
+            var dist = dists[k].d;
 
-            if (dist > MAX_DIST) continue;
-
-            // Vecteur unitaire le long du segment
+            // Vecteurs unitaires
             var ux = dx / dist;
             var uy = dy / dist;
-
-            // Vecteur perpendiculaire unitaire
             var perpX = -uy;
             var perpY =  ux;
 
-            // Handle cp1 : à 1/3 du segment + déviation perp. aléatoire
-            var noise1 = (Math.random() - 0.5) * 2 * CURVE_NOISE;
-            var cp1x = pi.x + ux * dist * 0.33 + perpX * noise1;
-            var cp1y = pi.y + uy * dist * 0.33 + perpY * noise1;
+            // Points de contrôle Bézier : cp1 à 1/3, cp2 à 2/3
+            // avec déviation perpendiculaire indépendante
+            var n1 = (Math.random() - 0.5) * 2 * CURVE_NOISE;
+            var n2 = (Math.random() - 0.5) * 2 * CURVE_NOISE;
+            var cp1x = pi.x + ux * dist * 0.33 + perpX * n1;
+            var cp1y = pi.y + uy * dist * 0.33 + perpY * n1;
+            var cp2x = pi.x + ux * dist * 0.67 + perpX * n2;
+            var cp2y = pi.y + uy * dist * 0.67 + perpY * n2;
 
-            // Handle cp2 : à 2/3 du segment + déviation perp. indépendante
-            var noise2 = (Math.random() - 0.5) * 2 * CURVE_NOISE;
-            var cp2x = pi.x + ux * dist * 0.67 + perpX * noise2;
-            var cp2y = pi.y + uy * dist * 0.67 + perpY * noise2;
-
-            // Créer le PathItem dans le groupe
+            // Créer la courbe dans le groupe
             var path = grp.pathItems.add();
             path.stroked     = true;
             path.filled      = false;
             path.strokeWidth = STROKE_WIDTH;
             path.closed      = false;
 
-            // Nouvelle instance RGBColor par path — évite les bugs de référence
-            // partagée sur certaines versions d'Illustrator
             var c = new RGBColor();
             c.red   = STROKE_R;
             c.green = STROKE_G;
             c.blue  = STROKE_B;
             path.strokeColor = c;
 
-            // Ancre de départ
             var sp = path.pathPoints.add();
             sp.anchor         = [pi.x, pi.y];
-            sp.leftDirection  = [pi.x, pi.y];   // pas de courbe en amont
+            sp.leftDirection  = [pi.x, pi.y];
             sp.rightDirection = [cp1x, cp1y];
-            sp.pointType      = PointType.CORNER; // = 1, noeud sans tangentes continues
+            sp.pointType      = PointType.CORNER;
 
-            // Ancre d'arrivée
             var ep = path.pathPoints.add();
             ep.anchor         = [pj.x, pj.y];
             ep.leftDirection  = [cp2x, cp2y];
-            ep.rightDirection = [pj.x, pj.y];   // pas de courbe en aval
-            ep.pointType      = PointType.CORNER; // = 1
+            ep.rightDirection = [pj.x, pj.y];
+            ep.pointType      = PointType.CORNER;
 
             pathCount++;
         }
     }
 
-    // Supprimer le groupe s'il est vide (MAX_DIST trop petit)
+    // Supprimer le groupe si vide
     if (pathCount === 0) {
         grp.remove();
         craqLayer.locked  = wasLocked;
         craqLayer.visible = wasVisible;
-        alert(
-            "Aucune courbe générée.\n\n" +
-            "MAX_DIST (" + MAX_DIST + " pt) est probablement trop petit\n" +
-            "par rapport à la taille du document.\n\n" +
-            "Essayez d'augmenter MAX_DIST ou NUM_POINTS."
-        );
+        alert("Aucune courbe générée. Vérifiez les paramètres.");
         return;
     }
 
-    // Restaurer l'état locked/visible d'origine
     craqLayer.locked  = wasLocked;
     craqLayer.visible = wasVisible;
 
     alert(
-        "Craquelures générées avec succès !\n\n" +
-        "• " + pathCount + " courbes tracées\n" +
-        "• " + totalPts + " points de base utilisés\n" +
-        "• Layer : \"" + LAYER_NAME + "\" (en dessous de tous les autres)\n\n" +
-        "Astuce : si le réseau est trop dense ou trop lâche,\n" +
-        "ajustez NUM_POINTS et MAX_DIST en tête du script."
+        "Craquelures générées !\n\n" +
+        "• " + pathCount + " courbes\n" +
+        "• " + totalPts + " points (" + cols + " × " + rows + " grille)\n\n" +
+        "Pour ajuster : modifiez CELL_SIZE (taille cellules)\n" +
+        "et NUM_POINTS ou les dimensions de la grille."
     );
 }
