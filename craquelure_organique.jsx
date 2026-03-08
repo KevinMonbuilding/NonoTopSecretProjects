@@ -64,9 +64,8 @@ function main() {
 
     // Placer le layer sous tous les autres EN PREMIER,
     // avant de vider son contenu.
-    // Layer.move() avec un autre layer comme cible est instable en ExtendScript.
-    // La méthode fiable est zOrderPosition : 1 = position la plus basse (derrière tout).
-    craqLayer.zOrderPosition = 1;
+    // Layer.zOrder(ZOrderMethod.SENDTOBACK) est l'API officielle pour ça.
+    craqLayer.zOrder(ZOrderMethod.SENDTOBACK);
 
     // Vider le layer avant régénération pour éviter l'accumulation
     // lors de relances successives sur le même document.
