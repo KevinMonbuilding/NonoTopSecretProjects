@@ -1,15 +1,21 @@
 // =============================================================
-// craquelure_organique.jsx  –  v7  (Organic Voronoï – bounds fix)
+// craquelure_organique.jsx  –  v8  (Frame detection)
 //
-// Generates a Voronoï crack network clipped to the drawing
-// bounding box. Each edge is drawn ONCE (no double lines).
-// Edges are organically curved via deterministic Bézier wobble.
+// Generates a Voronoï crack network clipped to the DRAWING
+// FRAME (the largest closed rectangle in the document), NOT
+// the full bounding box of all content. This excludes color
+// code legends, copyright text, etc. that sit outside the frame.
 //
-// v7 fixes:
+// v8 changes:
+//  - NEW: detectFrameRect() finds the largest closed pathItem
+//    in the document and uses its bounds as the clip region
+//  - Fallback to getDrawingBounds() if no suitable frame found
+//  - Alert now shows which detection method was used
+//
+// Previous fixes (v7):
 //  - Removed duplicate dead code block that overwrote Bézier
-//    handles WITHOUT clamping on every last path point (root
-//    cause of overflow)
-//  - getDrawingBounds now recurses into sublayers
+//    handles WITHOUT clamping (root cause of overflow)
+//  - getDrawingBounds recurses into sublayers
 //
 // Usage : File > Scripts > Other Script… > craquelure_organique.jsx
 // =============================================================
@@ -87,8 +93,16 @@ function hashString(str) {
 function main() {
     var doc = app.activeDocument;
 
-    // --- Compute drawing bounding box (all visible content except Craquelures) ---
-    var drawBounds = getDrawingBounds(doc);
+    // --- Detect the drawing frame (largest closed rectangle) ---
+    var boundsMethod = "frame";
+    var drawBounds = detectFrameRect(doc);
+
+    // Fallback: use all-content bounding box if no frame found
+    if (!drawBounds) {
+        boundsMethod = "allContent";
+        drawBounds = getDrawingBounds(doc);
+    }
+
     if (!drawBounds) {
         alert("Aucun contenu visible trouvé dans le document (hors layer Craquelures).");
         return;
@@ -278,10 +292,11 @@ function main() {
     }
 
     alert(
-        "Craquelures v7 generees !\n\n" +
+        "Craquelures v8 generees !\n\n" +
         "  " + cellCount + " cellules\n" +
         "  " + edgeCount + " aretes uniques dessinees\n" +
         "  Grille " + cols + " x " + rows + " (" + seeds.length + " graines actives)\n\n" +
+        "  Detection: " + (boundsMethod === "frame" ? "CADRE DETECTE (plus grand rectangle ferme)" : "FALLBACK (bounding box globale)") + "\n" +
         "  Bounds dessin: [" + Math.round(drawBounds.xMin) + ", " + Math.round(drawBounds.yMin) +
                          ", " + Math.round(drawBounds.xMax) + ", " + Math.round(drawBounds.yMax) + "]\n" +
         "  Artboard:      [" + Math.round(abXMin) + ", " + Math.round(abYMin) +
@@ -348,6 +363,111 @@ function getDrawingBounds(doc) {
 
     if (!hasContent) return null;
     return { xMin: bxMin, yMin: byMin, xMax: bxMax, yMax: byMax };
+}
+
+// ============================================================
+// Detect the drawing frame: find the largest CLOSED pathItem
+// in the document (excluding the Craquelures layer).
+//
+// Strategy:
+//  - Walk all layers/sublayers/groups recursively
+//  - For each closed, visible pathItem, compute bounding box area
+//  - The largest one is almost certainly the illustration frame
+//  - Require it covers at least 30% of the artboard (safety check)
+//
+// Returns {xMin, yMin, xMax, yMax} or null if not found.
+// ============================================================
+function detectFrameRect(doc) {
+    var bestArea = 0;
+    var bestBounds = null;
+
+    // Artboard area for the 30% threshold check
+    var ab   = doc.artboards[doc.artboards.getActiveArtboardIndex()];
+    var rect = ab.artboardRect;
+    var abW  = Math.abs(rect[2] - rect[0]);
+    var abH  = Math.abs(rect[3] - rect[1]);
+    var abArea = abW * abH;
+
+    function walkItems(container) {
+        // Walk pathItems
+        for (var i = 0; i < container.pathItems.length; i++) {
+            var p = container.pathItems[i];
+            if (p.hidden) continue;
+            if (!p.closed) continue;
+
+            var gb = p.geometricBounds;
+            var left   = Math.min(gb[0], gb[2]);
+            var right  = Math.max(gb[0], gb[2]);
+            var top    = Math.max(gb[1], gb[3]);
+            var bottom = Math.min(gb[1], gb[3]);
+
+            var w = right - left;
+            var h = top - bottom;
+            var area = w * h;
+
+            if (area > bestArea) {
+                bestArea = area;
+                bestBounds = { xMin: left, xMax: right, yMin: bottom, yMax: top };
+            }
+        }
+
+        // Walk groups
+        for (var g = 0; g < container.groupItems.length; g++) {
+            walkItems(container.groupItems[g]);
+        }
+
+        // Walk compound paths (their pathItems)
+        for (var c = 0; c < container.compoundPathItems.length; c++) {
+            var cp = container.compoundPathItems[c];
+            if (cp.hidden) continue;
+            // compoundPathItem has pathItems
+            for (var pi = 0; pi < cp.pathItems.length; pi++) {
+                var pp = cp.pathItems[pi];
+                if (!pp.closed) continue;
+                var gpb = pp.geometricBounds;
+                var cl = Math.min(gpb[0], gpb[2]);
+                var cr = Math.max(gpb[0], gpb[2]);
+                var ct = Math.max(gpb[1], gpb[3]);
+                var cb = Math.min(gpb[1], gpb[3]);
+                var cw = cr - cl;
+                var ch = ct - cb;
+                var ca = cw * ch;
+                if (ca > bestArea) {
+                    bestArea = ca;
+                    bestBounds = { xMin: cl, xMax: cr, yMin: cb, yMax: ct };
+                }
+            }
+        }
+    }
+
+    for (var li = 0; li < doc.layers.length; li++) {
+        var lay = doc.layers[li];
+        if (lay.name === LAYER_NAME) continue;
+        if (!lay.visible) continue;
+
+        walkItems(lay);
+
+        // Also recurse sublayers
+        for (var si = 0; si < lay.layers.length; si++) {
+            walkSubLayer(lay.layers[si]);
+        }
+    }
+
+    function walkSubLayer(subLay) {
+        if (subLay.name === LAYER_NAME) return;
+        if (!subLay.visible) return;
+        walkItems(subLay);
+        for (var si = 0; si < subLay.layers.length; si++) {
+            walkSubLayer(subLay.layers[si]);
+        }
+    }
+
+    // Safety: the frame should cover at least 30% of the artboard
+    if (bestBounds && bestArea >= abArea * 0.30) {
+        return bestBounds;
+    }
+
+    return null;
 }
 
 // ============================================================
