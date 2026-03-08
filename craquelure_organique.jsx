@@ -63,19 +63,10 @@ function main() {
     }
 
     // Placer le layer sous tous les autres EN PREMIER,
-    // avant de vider son contenu — l'index de doc.layers peut changer
-    // après des suppressions, ce qui rendrait le move() imprévisible.
-    var bottomLayer = null;
-    for (var bi = doc.layers.length - 1; bi >= 0; bi--) {
-        if (doc.layers[bi].name !== LAYER_NAME) {
-            bottomLayer = doc.layers[bi];
-            break;
-        }
-    }
-    if (bottomLayer !== null) {
-        // ElementPlacement.PLACEAFTER = 4
-        craqLayer.move(bottomLayer, 4);
-    }
+    // avant de vider son contenu.
+    // Layer.move() avec un autre layer comme cible est instable en ExtendScript.
+    // La méthode fiable est zOrderPosition : 1 = position la plus basse (derrière tout).
+    craqLayer.zOrderPosition = 1;
 
     // Vider le layer avant régénération pour éviter l'accumulation
     // lors de relances successives sur le même document.
