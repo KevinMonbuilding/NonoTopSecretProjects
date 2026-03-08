@@ -1,21 +1,20 @@
 // =============================================================
-// craquelure_organique.jsx  –  v8  (Frame detection)
+// craquelure_organique.jsx  –  v9  (Native clip mask)
 //
 // Generates a Voronoï crack network clipped to the DRAWING
 // FRAME (the largest closed rectangle in the document), NOT
-// the full bounding box of all content. This excludes color
-// code legends, copyright text, etc. that sit outside the frame.
+// the full bounding box of all content.
 //
-// v8 changes:
-//  - NEW: detectFrameRect() finds the largest closed pathItem
-//    in the document and uses its bounds as the clip region
+// v9 changes:
+//  - NEW: after drawing all edges, a rectangle matching the
+//    frame bounds is added as the FIRST item in the group and
+//    group.clipped = true is set → Illustrator native clip mask.
+//    This guarantees ZERO overflow regardless of math rounding.
+//
+// v8:
+//  - detectFrameRect() finds the largest closed pathItem
 //  - Fallback to getDrawingBounds() if no suitable frame found
-//  - Alert now shows which detection method was used
-//
-// Previous fixes (v7):
-//  - Removed duplicate dead code block that overwrote Bézier
-//    handles WITHOUT clamping (root cause of overflow)
-//  - getDrawingBounds recurses into sublayers
+//  - Alert shows which detection method was used
 //
 // Usage : File > Scripts > Other Script… > craquelure_organique.jsx
 // =============================================================
@@ -283,6 +282,30 @@ function main() {
         }
     }
 
+    // ============================================================
+    // PHASE 3: Add a native Illustrator clip mask to the group.
+    // The clip rectangle must be the FRONTMOST item in the group.
+    // We draw it last, then send it to front with zOrder.
+    // ============================================================
+    var clipRect = grp.pathItems.add();
+    clipRect.stroked = false;
+    clipRect.filled  = false;  // no fill — only used as mask shape
+
+    // Rectangle in Illustrator: [left, top, width, height] — top > bottom
+    clipRect.setEntirePath([
+        [xMin, yMax],
+        [xMax, yMax],
+        [xMax, yMin],
+        [xMin, yMin]
+    ]);
+    clipRect.closed = true;
+
+    // Bring the clip rect to front within the group so it acts as mask
+    clipRect.zOrder(ZOrderMethod.BRINGTOFRONT);
+
+    // Activate clipping on the group
+    grp.clipped = true;
+
     craqLayer.locked  = wasLocked;
     craqLayer.visible = wasVisible;
 
@@ -292,7 +315,7 @@ function main() {
     }
 
     alert(
-        "Craquelures v8 generees !\n\n" +
+        "Craquelures v9 generees !\n\n" +
         "  " + cellCount + " cellules\n" +
         "  " + edgeCount + " aretes uniques dessinees\n" +
         "  Grille " + cols + " x " + rows + " (" + seeds.length + " graines actives)\n\n" +
