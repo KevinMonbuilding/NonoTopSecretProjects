@@ -22,6 +22,9 @@ var LAYER_NAME    = "Craquelures";
 var DRAW_MARGIN   = 10;   // Marge autour de la bounding box du dessin (pt)
 // ----------------------------
 
+// Global clip bounds — set by main(), used by drawOrganicEdge()
+var CLIP_XMIN, CLIP_XMAX, CLIP_YMIN, CLIP_YMAX;
+
 if (app.documents.length === 0) {
     alert("Aucun document ouvert.");
 } else {
@@ -103,6 +106,12 @@ function main() {
     xMax = Math.min(xMax, abXMax);
     yMin = Math.max(yMin, abYMin);
     yMax = Math.min(yMax, abYMax);
+
+    // Store in globals for drawOrganicEdge clamping
+    CLIP_XMIN = xMin;
+    CLIP_XMAX = xMax;
+    CLIP_YMIN = yMin;
+    CLIP_YMAX = yMax;
 
     var W = xMax - xMin;
     var H = yMax - yMin;
@@ -350,6 +359,16 @@ function clipHalfPlane(poly, mx, my, nx, ny) {
 }
 
 // ============================================================
+// Clamp a point [x, y] to the global clip bounds
+// ============================================================
+function clampPt(pt) {
+    return [
+        Math.max(CLIP_XMIN, Math.min(CLIP_XMAX, pt[0])),
+        Math.max(CLIP_YMIN, Math.min(CLIP_YMAX, pt[1]))
+    ];
+}
+
+// ============================================================
 // Draw a SINGLE edge as an organic Bézier curve.
 //
 // Uses a deterministic PRNG seeded from the edge key so
@@ -390,6 +409,10 @@ function drawOrganicEdge(container, ptA, ptB, strokeCol, key) {
         mx += perpX * offset;
         my += perpY * offset;
 
+        // Clamp to clip bounds so wobble never escapes
+        mx = Math.max(CLIP_XMIN, Math.min(CLIP_XMAX, mx));
+        my = Math.max(CLIP_YMIN, Math.min(CLIP_YMAX, my));
+
         pts.push({ x: mx, y: my });
     }
 
@@ -407,7 +430,7 @@ function drawOrganicEdge(container, ptA, ptB, strokeCol, key) {
 
     for (var pi = 0; pi < nPts; pi++) {
         var pp = path.pathPoints.add();
-        var pt = [pts[pi].x, pts[pi].y];
+        var pt = clampPt([pts[pi].x, pts[pi].y]);
         pp.anchor = pt;
 
         if (pi === 0 || pi === nPts - 1) {
@@ -427,6 +450,42 @@ function drawOrganicEdge(container, ptA, ptB, strokeCol, key) {
                 hx = 0;
                 hy = 0;
             }
+
+            if (pi === 0) {
+                pp.leftDirection  = pt;  // no handle on the outside
+                pp.rightDirection = clampPt([pt[0] + hx, pt[1] + hy]);
+            } else {
+                pp.leftDirection  = clampPt([pt[0] - hx, pt[1] - hy]);
+                pp.rightDirection = pt;  // no handle on the outside
+            }
+            pp.pointType = PointType.SMOOTH;
+        } else {
+            // Interior subdivision point: smooth Bézier
+            var prev = pts[pi - 1];
+            var next = pts[pi + 1];
+
+            var dPrev = Math.sqrt((pt[0] - prev.x) * (pt[0] - prev.x) + (pt[1] - prev.y) * (pt[1] - prev.y));
+            var dNext = Math.sqrt((pt[0] - next.x) * (pt[0] - next.x) + (pt[1] - next.y) * (pt[1] - next.y));
+            var handleL = Math.min(dPrev * 0.35, 12);
+            var handleR = Math.min(dNext * 0.35, 12);
+
+            // Direction: smooth spline through prev → current → next
+            var shx = next.x - prev.x;
+            var shy = next.y - prev.y;
+            var shLen = Math.sqrt(shx * shx + shy * shy);
+            if (shLen > 0.001) {
+                shx /= shLen;
+                shy /= shLen;
+            } else {
+                shx = 0;
+                shy = 0;
+            }
+
+            pp.leftDirection  = clampPt([pt[0] - shx * handleL, pt[1] - shy * handleL]);
+            pp.rightDirection = clampPt([pt[0] + shx * handleR, pt[1] + shy * handleR]);
+            pp.pointType      = PointType.SMOOTH;
+        }
+    }
 
             if (pi === 0) {
                 pp.leftDirection  = pt;  // no handle on the outside
