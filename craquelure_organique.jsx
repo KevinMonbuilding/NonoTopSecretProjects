@@ -34,19 +34,20 @@ function main() {
     // ce qui est faux si le document contient plusieurs artboards.
     //
     // artboardRect = [left, top, right, bottom] en coordonnées Illustrator.
-    // Dans l'espace interne d'Illustrator :
-    //   - Origine = coin bas-gauche du document
-    //   - X positif = vers la droite
-    //   - Y positif = vers le haut
-    // Donc : left < right, et top > bottom (top est le bord supérieur = Y plus grand)
+    // Dans l'espace interne d'Illustrator, Y est positif vers le HAUT,
+    // donc "top" est un Y plus grand (moins négatif) que "bottom".
+    // Exemple pour un A4 : rect = [0, 0, 595, -842]
+    //   left=0, top=0, right=595, bottom=-842
+    //   W = 595 - 0   = 595  (positif ✓)
+    //   H = 0 - (-842) = 842  (positif ✓)
     var ab   = doc.artboards[doc.artboards.getActiveArtboardIndex()];
     var rect = ab.artboardRect;   // [left, top, right, bottom]
     var abLeft   = rect[0];
     var abTop    = rect[1];
     var abRight  = rect[2];
     var abBottom = rect[3];
-    var W = abRight  - abLeft;    // largeur  (positif)
-    var H = abTop    - abBottom;  // hauteur  (positif, car top > bottom)
+    var W = abRight  - abLeft;    // largeur  (toujours positif)
+    var H = abTop    - abBottom;  // hauteur  (positif car top > bottom en valeur algébrique)
 
     // --- Créer ou récupérer le layer "Craquelures" ---
     var craqLayer = null;
@@ -61,16 +62,9 @@ function main() {
         craqLayer.name = LAYER_NAME;
     }
 
-    // Vider le layer avant régénération pour éviter l'accumulation
-    // lors de relances successives sur le même document.
-    craqLayer.locked = false;
-    craqLayer.visible = true;
-    while (craqLayer.pageItems.length > 0) {
-        craqLayer.pageItems[0].remove();
-    }
-
-    // Placer le layer sous tous les autres.
-    // On cherche le layer le plus bas qui n'est PAS "Craquelures".
+    // Placer le layer sous tous les autres EN PREMIER,
+    // avant de vider son contenu — l'index de doc.layers peut changer
+    // après des suppressions, ce qui rendrait le move() imprévisible.
     var bottomLayer = null;
     for (var bi = doc.layers.length - 1; bi >= 0; bi--) {
         if (doc.layers[bi].name !== LAYER_NAME) {
@@ -80,6 +74,17 @@ function main() {
     }
     if (bottomLayer !== null) {
         craqLayer.move(bottomLayer, ElementPlacement.PLACEAFTER);
+    }
+
+    // Vider le layer avant régénération pour éviter l'accumulation
+    // lors de relances successives sur le même document.
+    // On sauvegarde l'état locked/visible pour le restaurer après.
+    var wasLocked  = craqLayer.locked;
+    var wasVisible = craqLayer.visible;
+    craqLayer.locked  = false;
+    craqLayer.visible = true;
+    while (craqLayer.pageItems.length > 0) {
+        craqLayer.pageItems[0].remove();
     }
 
     // --- Générer les points aléatoires sur l'artboard ---
@@ -94,14 +99,19 @@ function main() {
         });
     }
 
-    // Points supplémentaires sur les 4 bords pour couvrir les marges
+    // Points supplémentaires sur les 4 bords pour couvrir les marges.
+    // On les rentre d'une demi-MAX_DIST vers l'intérieur pour éviter que
+    // les handles Bézier débordent hors de l'artboard.
+    var margin = MAX_DIST * 0.5;
     var edgeCount = Math.round(Math.sqrt(NUM_POINTS) * 2);
     for (var e = 0; e < edgeCount; e++) {
         var t = (e + 0.5) / edgeCount;
-        pts.push({ x: abLeft  + t * W, y: abTop    });  // bord haut
-        pts.push({ x: abLeft  + t * W, y: abBottom });  // bord bas
-        pts.push({ x: abLeft,          y: abBottom + t * H }); // bord gauche
-        pts.push({ x: abRight,         y: abBottom + t * H }); // bord droit
+        var ex = abLeft   + margin + t * (W - 2 * margin);
+        var ey = abBottom + margin + t * (H - 2 * margin);
+        pts.push({ x: ex,       y: abTop    - margin }); // bord haut
+        pts.push({ x: ex,       y: abBottom + margin }); // bord bas
+        pts.push({ x: abLeft  + margin, y: ey });         // bord gauche
+        pts.push({ x: abRight - margin, y: ey });         // bord droit
     }
 
     var totalPts = pts.length;
@@ -178,6 +188,8 @@ function main() {
     // Supprimer le groupe s'il est vide (MAX_DIST trop petit)
     if (pathCount === 0) {
         grp.remove();
+        craqLayer.locked  = wasLocked;
+        craqLayer.visible = wasVisible;
         alert(
             "Aucune courbe générée.\n\n" +
             "MAX_DIST (" + MAX_DIST + " pt) est probablement trop petit\n" +
@@ -186,6 +198,10 @@ function main() {
         );
         return;
     }
+
+    // Restaurer l'état locked/visible d'origine
+    craqLayer.locked  = wasLocked;
+    craqLayer.visible = wasVisible;
 
     alert(
         "Craquelures générées avec succès !\n\n" +
