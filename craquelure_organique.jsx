@@ -1,9 +1,15 @@
 // =============================================================
-// craquelure_organique.jsx  –  v6  (Organic Voronoï – single edges)
+// craquelure_organique.jsx  –  v7  (Organic Voronoï – bounds fix)
 //
 // Generates a Voronoï crack network clipped to the drawing
 // bounding box. Each edge is drawn ONCE (no double lines).
 // Edges are organically curved via deterministic Bézier wobble.
+//
+// v7 fixes:
+//  - Removed duplicate dead code block that overwrote Bézier
+//    handles WITHOUT clamping on every last path point (root
+//    cause of overflow)
+//  - getDrawingBounds now recurses into sublayers
 //
 // Usage : File > Scripts > Other Script… > craquelure_organique.jsx
 // =============================================================
@@ -19,7 +25,7 @@ var STROKE_G      = 180;
 var STROKE_B      = 220;
 var STROKE_WIDTH  = 0.5;
 var LAYER_NAME    = "Craquelures";
-var DRAW_MARGIN   = 10;   // Marge autour de la bounding box du dessin (pt)
+var DRAW_MARGIN   = 0;    // Marge autour de la bounding box du dessin (pt) — 0 = strictement dans le dessin
 // ----------------------------
 
 // Global clip bounds — set by main(), used by drawOrganicEdge()
@@ -272,19 +278,26 @@ function main() {
     }
 
     alert(
-        "Craquelures v6 generees !\n\n" +
+        "Craquelures v7 generees !\n\n" +
         "  " + cellCount + " cellules\n" +
         "  " + edgeCount + " aretes uniques dessinees\n" +
-        "  Grille " + cols + " x " + rows + " (" + seeds.length + " graines actives)\n" +
-        "  Zone dessin: [" + Math.round(xMin) + ", " + Math.round(yMin) +
-                       ", " + Math.round(xMax) + ", " + Math.round(yMax) + "]\n\n" +
+        "  Grille " + cols + " x " + rows + " (" + seeds.length + " graines actives)\n\n" +
+        "  Bounds dessin: [" + Math.round(drawBounds.xMin) + ", " + Math.round(drawBounds.yMin) +
+                         ", " + Math.round(drawBounds.xMax) + ", " + Math.round(drawBounds.yMax) + "]\n" +
+        "  Artboard:      [" + Math.round(abXMin) + ", " + Math.round(abYMin) +
+                         ", " + Math.round(abXMax) + ", " + Math.round(abYMax) + "]\n" +
+        "  Clip final:    [" + Math.round(xMin) + ", " + Math.round(yMin) +
+                         ", " + Math.round(xMax) + ", " + Math.round(yMax) + "]\n\n" +
         "Ajustez CELL_SIZE_AVG, SEED_REMOVAL, WOBBLE_AMP pour varier le rendu."
     );
 }
 
 // ============================================================
 // Compute bounding box of all visible content EXCEPT the
-// Craquelures layer. Returns {xMin, yMin, xMax, yMax} or null.
+// Craquelures layer. Uses layer.pageItems (top-level) which
+// already includes groups with their full bounds. Also walks
+// sublayers recursively.
+// Returns {xMin, yMin, xMax, yMax} or null.
 // ============================================================
 function getDrawingBounds(doc) {
     var hasContent = false;
@@ -293,14 +306,16 @@ function getDrawingBounds(doc) {
     var bxMax = -1e12;
     var byMax = -1e12;
 
-    for (var li = 0; li < doc.layers.length; li++) {
-        var lay = doc.layers[li];
-        if (lay.name === LAYER_NAME) continue;
-        if (!lay.visible) continue;
+    function processLayer(lay) {
+        if (lay.name === LAYER_NAME) return;
+        if (!lay.visible) return;
 
+        // Process items on this layer
         for (var pi = 0; pi < lay.pageItems.length; pi++) {
             var item = lay.pageItems[pi];
             if (item.hidden) continue;
+            // Skip items that are themselves layers (sublayers show as pageItems too sometimes)
+            if (item.typename === "Layer") continue;
 
             var gb = item.geometricBounds;
             var iLeft   = gb[0];
@@ -320,6 +335,15 @@ function getDrawingBounds(doc) {
 
             hasContent = true;
         }
+
+        // Recurse into sublayers
+        for (var si = 0; si < lay.layers.length; si++) {
+            processLayer(lay.layers[si]);
+        }
+    }
+
+    for (var li = 0; li < doc.layers.length; li++) {
+        processLayer(doc.layers[li]);
     }
 
     if (!hasContent) return null;
@@ -483,41 +507,6 @@ function drawOrganicEdge(container, ptA, ptB, strokeCol, key) {
 
             pp.leftDirection  = clampPt([pt[0] - shx * handleL, pt[1] - shy * handleL]);
             pp.rightDirection = clampPt([pt[0] + shx * handleR, pt[1] + shy * handleR]);
-            pp.pointType      = PointType.SMOOTH;
-        }
-    }
-
-            if (pi === 0) {
-                pp.leftDirection  = pt;  // no handle on the outside
-                pp.rightDirection = [pt[0] + hx, pt[1] + hy];
-            } else {
-                pp.leftDirection  = [pt[0] - hx, pt[1] - hy];
-                pp.rightDirection = pt;  // no handle on the outside
-            }
-            pp.pointType = PointType.SMOOTH;
-        } else {
-            // Interior subdivision point: smooth Bézier
-            var prev = pts[pi - 1];
-            var next = pts[pi + 1];
-
-            var dPrev = Math.sqrt((pt[0] - prev.x) * (pt[0] - prev.x) + (pt[1] - prev.y) * (pt[1] - prev.y));
-            var dNext = Math.sqrt((pt[0] - next.x) * (pt[0] - next.x) + (pt[1] - next.y) * (pt[1] - next.y));
-            var handleL = Math.min(dPrev * 0.35, 12);
-            var handleR = Math.min(dNext * 0.35, 12);
-
-            var shx = next.x - prev.x;
-            var shy = next.y - prev.y;
-            var shLen = Math.sqrt(shx * shx + shy * shy);
-            if (shLen > 0.001) {
-                shx /= shLen;
-                shy /= shLen;
-            } else {
-                shx = 0;
-                shy = 0;
-            }
-
-            pp.leftDirection  = [pt[0] - shx * handleL, pt[1] - shy * handleL];
-            pp.rightDirection = [pt[0] + shx * handleR, pt[1] + shy * handleR];
             pp.pointType      = PointType.SMOOTH;
         }
     }
