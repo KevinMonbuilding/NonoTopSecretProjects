@@ -1,5 +1,5 @@
 // =============================================================
-// craquelure_organique.jsx  –  v3  (Voronoï + Sutherland-Hodgman)
+// craquelure_organique.jsx  –  v4  (Voronoï + Sutherland-Hodgman)
 //
 // Génère un réseau de cellules Voronoï clippées sur l'artboard.
 // Chaque cellule est un polygone FERMÉ → mosaïque/craquelure propre.
@@ -30,13 +30,26 @@ function main() {
     var doc = app.activeDocument;
 
     // --- Artboard bounds ---
-    var ab      = doc.artboards[doc.artboards.getActiveArtboardIndex()];
-    var rect    = ab.artboardRect; // [left, top, right, bottom]
-    var abL = rect[0], abT = rect[1], abR = rect[2], abB = rect[3];
-    // Note: in Illustrator coords, abT > abB (Y grows upward internally,
-    // but artboardRect stores [L, T, R, B] where T is numerically larger)
-    var W = abR - abL;
-    var H = abT - abB; // positive
+    // artboardRect = [left, top, right, bottom]
+    // In Illustrator, Y can go either way depending on the document:
+    //   Case A: [0, 842, 595, 0]     → top=842 > bottom=0  (Y up)
+    //   Case B: [0, 0, 595, -842]    → top=0   > bottom=-842 (Y up, but shifted)
+    // In all cases: top > bottom numerically.
+    var ab   = doc.artboards[doc.artboards.getActiveArtboardIndex()];
+    var rect = ab.artboardRect;
+    var abL  = rect[0];
+    var abT  = rect[1];
+    var abR  = rect[2];
+    var abB  = rect[3];
+
+    // Ensure min/max are correct regardless of coordinate system
+    var xMin = Math.min(abL, abR);
+    var xMax = Math.max(abL, abR);
+    var yMin = Math.min(abT, abB);
+    var yMax = Math.max(abT, abB);
+
+    var W = xMax - xMin;
+    var H = yMax - yMin;
 
     // --- Layer management ---
     var craqLayer = null;
@@ -66,13 +79,21 @@ function main() {
     var rows = Math.ceil((H + 2 * pad) / CELL_SIZE) + 1;
     var seeds = [];
 
+    // Build a 2D grid index for fast neighbor lookup
+    var grid = [];
+    for (var gr = 0; gr < rows; gr++) {
+        grid[gr] = [];
+    }
+
     for (var row = 0; row < rows; row++) {
         for (var col = 0; col < cols; col++) {
-            var bx = abL - pad + col * CELL_SIZE;
-            var by = abB - pad + row * CELL_SIZE;
+            var bx = xMin - pad + col * CELL_SIZE;
+            var by = yMin - pad + row * CELL_SIZE;
             var sx = bx + (Math.random() - 0.5) * 2 * CELL_SIZE * JITTER;
             var sy = by + (Math.random() - 0.5) * 2 * CELL_SIZE * JITTER;
-            seeds.push({ x: sx, y: sy, col: col, row: row });
+            var seed = { x: sx, y: sy, col: col, row: row, idx: seeds.length };
+            seeds.push(seed);
+            grid[row][col] = seed;
         }
     }
 
@@ -82,27 +103,17 @@ function main() {
     strokeCol.green = STROKE_G;
     strokeCol.blue  = STROKE_B;
 
-    // --- Artboard as initial clipping polygon (slightly inset to avoid hairlines on border) ---
-    var INS = 0; // inset in pt — 0 = flush with artboard edge
-    var artboardPoly = [
-        { x: abL + INS, y: abB + INS },
-        { x: abR - INS, y: abB + INS },
-        { x: abR - INS, y: abT - INS },
-        { x: abL + INS, y: abT - INS }
-    ];
-
     var grp = craqLayer.groupItems.add();
     var cellCount = 0;
 
     // Big initial polygon for each cell (much larger than any possible cell)
     var BIG = (W + H) * 2;
 
+    // Neighbor search radius in grid cells (not points)
+    var GRID_SEARCH = 3; // search ±3 cells in the grid
+
     for (var si = 0; si < seeds.length; si++) {
         var s = seeds[si];
-
-        // Skip seeds that are far outside artboard + padding (won't produce visible cells)
-        if (s.x < abL - pad - CELL_SIZE || s.x > abR + pad + CELL_SIZE) continue;
-        if (s.y < abB - pad - CELL_SIZE || s.y > abT + pad + CELL_SIZE) continue;
 
         // Start with a large bounding square centred on the seed
         var poly = [
@@ -113,35 +124,49 @@ function main() {
         ];
 
         // --- Clip by half-plane for each neighbour seed ---
-        // Only consider seeds within a reasonable distance (2.5 * CELL_SIZE)
-        var searchRadius = CELL_SIZE * 3.5;
-        var searchRadiusSq = searchRadius * searchRadius;
+        // Use grid-based lookup: only check seeds within ±GRID_SEARCH cells
+        var rMin = Math.max(0, s.row - GRID_SEARCH);
+        var rMax = Math.min(rows - 1, s.row + GRID_SEARCH);
+        var cMin = Math.max(0, s.col - GRID_SEARCH);
+        var cMax = Math.min(cols - 1, s.col + GRID_SEARCH);
 
-        for (var ni = 0; ni < seeds.length; ni++) {
-            if (ni === si) continue;
-            var n = seeds[ni];
-            var dx = n.x - s.x;
-            var dy = n.y - s.y;
-            var distSq = dx * dx + dy * dy;
-            if (distSq > searchRadiusSq) continue;
+        for (var nr = rMin; nr <= rMax; nr++) {
+            for (var nc = cMin; nc <= cMax; nc++) {
+                if (nr === s.row && nc === s.col) continue;
+                var nb = grid[nr][nc];
 
-            // Half-plane: keep points closer to s than to n
-            // Boundary: perpendicular bisector of [s, n]
-            // Normal pointing FROM s TOWARD n: (dx, dy)/dist
-            // A point p is in the half-plane (on s's side) if:
-            //   dot(p - mid, (n - s)) <= 0
-            // i.e.  (p.x - mx)*dx + (p.y - my)*dy <= 0
-            var mx = (s.x + n.x) * 0.5;
-            var my = (s.y + n.y) * 0.5;
+                var dx = nb.x - s.x;
+                var dy = nb.y - s.y;
 
-            poly = sutherlandHodgmanHalfPlane(poly, mx, my, dx, dy);
-            if (poly.length < 3) break; // degenerate cell — skip
+                // Half-plane: keep points closer to s than to nb
+                // Normal pointing FROM s TOWARD nb: (dx, dy)
+                // A point p is on s's side if: dot(p - mid, (nb - s)) <= 0
+                var mx = (s.x + nb.x) * 0.5;
+                var my = (s.y + nb.y) * 0.5;
+
+                poly = clipHalfPlane(poly, mx, my, dx, dy);
+                if (poly.length < 3) break;
+            }
+            if (poly.length < 3) break;
         }
 
         if (poly.length < 3) continue;
 
-        // --- Clip against artboard ---
-        poly = sutherlandHodgmanPolygon(poly, artboardPoly);
+        // --- Clip against artboard using 4 explicit half-planes ---
+        // This is winding-order-independent and works regardless of
+        // which way Y points in the document.
+        //
+        // Each half-plane: keep points where dot(p - edgePoint, outwardNormal) <= 0
+        //   Left edge:   keep x >= xMin  →  outward normal (-1, 0),  point on edge (xMin, 0)
+        //   Right edge:  keep x <= xMax  →  outward normal (+1, 0),  point on edge (xMax, 0)
+        //   Bottom edge: keep y >= yMin  →  outward normal (0, -1),  point on edge (0, yMin)
+        //   Top edge:    keep y <= yMax  →  outward normal (0, +1),  point on edge (0, yMax)
+
+        poly = clipHalfPlane(poly, xMin, 0,    -1,  0);   // left
+        if (poly.length >= 3) poly = clipHalfPlane(poly, xMax, 0,     1,  0);   // right
+        if (poly.length >= 3) poly = clipHalfPlane(poly, 0,    yMin,  0, -1);   // bottom
+        if (poly.length >= 3) poly = clipHalfPlane(poly, 0,    yMax,  0,  1);   // top
+
         if (poly.length < 3) continue;
 
         // --- Draw closed polygon ---
@@ -153,9 +178,10 @@ function main() {
     craqLayer.visible = wasVisible;
 
     alert(
-        "Craquelures générées !\n\n" +
-        "• " + cellCount + " cellules dessinées\n" +
-        "• Grille " + cols + " × " + rows + " = " + seeds.length + " graines\n\n" +
+        "Craquelures generees !\n\n" +
+        "  " + cellCount + " cellules dessinees\n" +
+        "  Grille " + cols + " x " + rows + " = " + seeds.length + " graines\n" +
+        "  Artboard: [" + xMin + ", " + yMin + ", " + xMax + ", " + yMax + "]\n\n" +
         "Ajustez CELL_SIZE pour changer la taille des cellules."
     );
 }
@@ -163,15 +189,13 @@ function main() {
 // ============================================================
 // SUTHERLAND-HODGMAN — clip polygon against a single half-plane
 //
-// The half-plane is defined by:
-//   A point M = (mx, my) on the boundary
-//   A normal direction (nx, ny) pointing OUTWARD (outside = excluded side)
+// Half-plane defined by:
+//   A point M = (mx, my) on the boundary line
+//   An outward normal (nx, ny) pointing toward the EXCLUDED side
 //
 // "Inside" = dot(p - M, N) <= 0
 // ============================================================
-function sutherlandHodgmanHalfPlane(poly, mx, my, nx, ny) {
-    // nx, ny here is the direction FROM seed s TO neighbour n,
-    // so "outside" = on n's side, "inside" = on s's side (dot <= 0).
+function clipHalfPlane(poly, mx, my, nx, ny) {
     var output = [];
     var len = poly.length;
     if (len === 0) return output;
@@ -183,8 +207,8 @@ function sutherlandHodgmanHalfPlane(poly, mx, my, nx, ny) {
         var dCur  = (cur.x  - mx) * nx + (cur.y  - my) * ny;
         var dNext = (next.x - mx) * nx + (next.y - my) * ny;
 
-        var curInside  = dCur  <= 0;
-        var nextInside = dNext <= 0;
+        var curInside  = (dCur  <= 0);
+        var nextInside = (dNext <= 0);
 
         if (curInside) {
             output.push(cur);
@@ -197,37 +221,6 @@ function sutherlandHodgmanHalfPlane(poly, mx, my, nx, ny) {
                 y: cur.y + t * (next.y - cur.y)
             });
         }
-    }
-    return output;
-}
-
-// ============================================================
-// SUTHERLAND-HODGMAN — clip polygon against another convex polygon
-// (applies one half-plane per edge of the clip polygon)
-// ============================================================
-function sutherlandHodgmanPolygon(subjectPoly, clipPoly) {
-    var output = subjectPoly.slice();
-    var clipLen = clipPoly.length;
-
-    for (var ci = 0; ci < clipLen; ci++) {
-        if (output.length === 0) break;
-
-        var A = clipPoly[ci];
-        var B = clipPoly[(ci + 1) % clipLen];
-
-        // Edge AB, interior is to the LEFT of AB
-        // Normal pointing RIGHT (outward for a CCW polygon) = (B.y-A.y, -(B.x-A.x))... 
-        // Actually we want the inward normal. For a CCW polygon the interior is to
-        // the left of each directed edge A→B.
-        // Left normal of (B-A): (-dy, dx) where dx=B.x-A.x, dy=B.y-A.y
-        // But S-H uses the "cut away outside" logic, so outward normal = (dy, -dx):
-        var edgeDx = B.x - A.x;
-        var edgeDy = B.y - A.y;
-        // Outward normal (right of directed edge, for CCW polygon = exterior side):
-        var outNx =  edgeDy;
-        var outNy = -edgeDx;
-
-        output = sutherlandHodgmanHalfPlane(output, A.x, A.y, outNx, outNy);
     }
     return output;
 }
@@ -246,9 +239,9 @@ function drawPolygon(container, poly, strokeCol) {
     for (var i = 0; i < poly.length; i++) {
         var pp = path.pathPoints.add();
         var pt = [poly[i].x, poly[i].y];
-        pp.anchor        = pt;
-        pp.leftDirection = pt;
+        pp.anchor         = pt;
+        pp.leftDirection  = pt;
         pp.rightDirection = pt;
-        pp.pointType     = PointType.CORNER;
+        pp.pointType      = PointType.CORNER;
     }
 }

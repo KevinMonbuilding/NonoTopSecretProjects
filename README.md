@@ -1,6 +1,6 @@
 # craquelure_organique.jsx
 
-Script ExtendScript pour Adobe Illustrator qui génère un réseau de craquelures organiques (effet mosaïque / voronoï fait-main) par-dessus un coloriage vectoriel.
+Script ExtendScript pour Adobe Illustrator qui génère un réseau de craquelures organiques (effet mosaïque / Voronoï) par-dessus un coloriage vectoriel.
 
 ## Avant / Après
 
@@ -15,33 +15,36 @@ Script ExtendScript pour Adobe Illustrator qui génère un réseau de craquelure
 3. Sélectionnez `craquelure_organique.jsx`
 4. Attendez quelques secondes — un layer `"Craquelures"` apparaît automatiquement sous votre dessin
 
+Le script est ré-exécutable : il vide le layer `Craquelures` avant de régénérer.
+
 ## Paramètres
 
 Tous les paramètres sont configurables en tête du script :
 
 | Paramètre | Défaut | Description |
 |-----------|--------|-------------|
-| `NUM_POINTS` | `400` | Nombre de points de base (densité du réseau) |
-| `MAX_DIST` | `70` | Distance max (pt) entre deux points pour les relier — contrôle la taille des cellules |
+| `CELL_SIZE` | `40` | Distance entre graines (pt) — contrôle la taille des cellules |
+| `JITTER` | `0.55` | Perturbation aléatoire des graines (0 = grille pure, 1 = max chaos) |
 | `STROKE_R/G/B` | `100, 180, 220` | Couleur du trait en RGB (défaut : bleu clair) |
 | `STROKE_WIDTH` | `0.5` | Épaisseur du trait en points |
-| `CURVE_NOISE` | `12` | Amplitude de déformation des courbes de Bézier (aspect organique) |
 | `LAYER_NAME` | `"Craquelures"` | Nom du layer créé dans le document |
 
 ## Comment ça marche
 
-1. Le script sème `NUM_POINTS` points aléatoires sur toute la surface du document
-2. Des points supplémentaires sont ajoutés sur les 4 bords pour que le réseau atteigne les marges
-3. Chaque paire de points dont la distance est inférieure à `MAX_DIST` est reliée par une courbe de Bézier cubique
-4. Les points de contrôle Bézier sont déviés aléatoirement (perpendiculairement au segment) pour l'aspect organique
-5. Toutes les courbes sont placées dans un layer dédié, sous les layers existants
+1. Le script génère une grille de graines avec perturbation aléatoire (jitter) sur l'artboard + une zone de padding
+2. Pour chaque graine, il calcule sa **cellule de Voronoï** en intersectant les demi-plans perpendiculaires bisectrices avec chaque voisin (algorithme de Sutherland-Hodgman)
+3. Chaque cellule est ensuite **clippée contre les bords de l'artboard** (4 demi-plans explicites : gauche, droite, haut, bas)
+4. Les cellules résultantes sont dessinées comme des polygones fermés (`closed = true`) avec stroke bleu clair et sans remplissage
+5. Toutes les cellules sont placées dans un layer dédié `"Craquelures"`, envoyé sous les layers existants
 
 ## Performance
 
-La génération est en O(n²) sur le nombre de points. Pour les gros documents :
-- 400 points → quelques secondes
-- Réduire `NUM_POINTS` à 250 si le script est trop lent
-- Augmenter `NUM_POINTS` à 600+ pour un réseau plus dense
+La recherche de voisins utilise un index de grille (±3 cellules) au lieu d'une recherche O(n²). Pour un A4 avec `CELL_SIZE=40` :
+- ~540 graines, ~15 voisins testés par graine
+- Génération en quelques secondes
+
+Augmenter `CELL_SIZE` pour des cellules plus grandes (et un script plus rapide).
+Diminuer `CELL_SIZE` pour un réseau plus dense (plus lent).
 
 ## Prérequis
 
