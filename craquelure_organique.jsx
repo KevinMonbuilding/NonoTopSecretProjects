@@ -1,20 +1,15 @@
 // =============================================================
-// craquelure_organique.jsx  –  v10  (Stroke inset)
+// craquelure_organique.jsx  –  v11  (True clip mask)
 //
-// v10 changes:
-//  - detectFrameRect() now also returns strokeInset = strokeWidth/2
-//    of the detected frame path. The clip bounds are shrunk by this
-//    amount so cracks stay strictly INSIDE the frame stroke, not
-//    overlapping it.
-//  - Minimum inset of 1pt applied as safety margin.
+// v11 changes:
+//  - detectFrameRect() now returns the actual pathItem object
+//  - Bounds computed from visibleBounds (includes stroke visually)
+//  - Clip mask = duplicate of the REAL frame pathItem, not a
+//    hand-crafted rectangle. Pixel-perfect alignment guaranteed.
 //
-// v9:
-//  - Native Illustrator clip mask on the group (grp.clipped = true)
-//    guarantees zero mathematical overflow at render time.
-//
-// v8:
-//  - detectFrameRect() finds the largest closed pathItem
-//  - Fallback to getDrawingBounds() if no suitable frame found
+// v10: strokeWidth/2 inset on reconstructed clip rect
+// v9:  grp.clipped = true with hand-crafted clip rect
+// v8:  detectFrameRect() + fallback to getDrawingBounds()
 //
 // Usage : File > Scripts > Other Script… > craquelure_organique.jsx
 // =============================================================
@@ -92,9 +87,11 @@ function hashString(str) {
 function main() {
     var doc = app.activeDocument;
 
-    // --- Detect the drawing frame (largest closed rectangle) ---
+    // --- Detect the drawing frame (largest closed pathItem) ---
     var boundsMethod = "frame";
-    var drawBounds = detectFrameRect(doc);
+    var frameResult  = detectFrameRect(doc);  // {bounds, item, typename} or null
+
+    var drawBounds = frameResult ? frameResult.bounds : null;
 
     // Fallback: use all-content bounding box if no frame found
     if (!drawBounds) {
@@ -107,17 +104,14 @@ function main() {
         return;
     }
 
-    // Inset by strokeWidth/2 so we clip to the INSIDE edge of the frame stroke.
-    // If no stroke info available (fallback), use a safe default of 1pt.
-    var inset = (drawBounds.strokeInset !== undefined) ? drawBounds.strokeInset : 1;
-    // Always inset at least 1pt as extra safety margin
-    inset = Math.max(inset, 1);
-
-    // Add margin (DRAW_MARGIN) and apply stroke inset
-    var xMin = drawBounds.xMin + inset - DRAW_MARGIN;
-    var xMax = drawBounds.xMax - inset + DRAW_MARGIN;
-    var yMin = drawBounds.yMin + inset - DRAW_MARGIN;
-    var yMax = drawBounds.yMax - inset + DRAW_MARGIN;
+    // Use visibleBounds from the detected item (includes stroke).
+    // drawBounds is already from visibleBounds if frameResult exists.
+    // No manual inset needed — visibleBounds IS the outer edge of the stroke,
+    // so the interior (where we want to draw) is already correct.
+    var xMin = drawBounds.xMin;
+    var xMax = drawBounds.xMax;
+    var yMin = drawBounds.yMin;
+    var yMax = drawBounds.yMax;
 
     // Also clamp to artboard so we never exceed it
     var ab   = doc.artboards[doc.artboards.getActiveArtboardIndex()];
@@ -289,27 +283,32 @@ function main() {
     }
 
     // ============================================================
-    // PHASE 3: Add a native Illustrator clip mask to the group.
-    // The clip rectangle must be the FRONTMOST item in the group.
-    // We draw it last, then send it to front with zOrder.
+    // PHASE 3: Native Illustrator clip mask using the REAL frame
+    // pathItem (duplicated into the group as frontmost element).
+    // This is pixel-perfect — no hand-crafted rectangle needed.
     // ============================================================
-    var clipRect = grp.pathItems.add();
-    clipRect.stroked = false;
-    clipRect.filled  = false;  // no fill — only used as mask shape
-
-    // Rectangle in Illustrator: [left, top, width, height] — top > bottom
-    clipRect.setEntirePath([
-        [xMin, yMax],
-        [xMax, yMax],
-        [xMax, yMin],
-        [xMin, yMin]
-    ]);
-    clipRect.closed = true;
-
-    // Bring the clip rect to front within the group so it acts as mask
-    clipRect.zOrder(ZOrderMethod.BRINGTOFRONT);
-
-    // Activate clipping on the group
+    if (frameResult && frameResult.item) {
+        // Duplicate the actual frame path into the group, then bring to front
+        var clipShape = frameResult.item.duplicate(grp);
+        clipShape.stroked = false;
+        clipShape.filled  = false;
+        clipShape.zOrder(ZOrderMethod.BRINGTOFRONT);
+        clipShape.clippingPath = true;
+    } else {
+        // Fallback: build a rectangle from computed bounds
+        var clipRect = grp.pathItems.add();
+        clipRect.stroked = false;
+        clipRect.filled  = false;
+        clipRect.setEntirePath([
+            [xMin, yMax],
+            [xMax, yMax],
+            [xMax, yMin],
+            [xMin, yMin]
+        ]);
+        clipRect.closed = true;
+        clipRect.clippingPath = true;
+        clipRect.zOrder(ZOrderMethod.BRINGTOFRONT);
+    }
     grp.clipped = true;
 
     craqLayer.locked  = wasLocked;
@@ -321,12 +320,14 @@ function main() {
     }
 
     alert(
-        "Craquelures v10 generees !\n\n" +
+        "Craquelures v11 generees !\n\n" +
         "  " + cellCount + " cellules\n" +
         "  " + edgeCount + " aretes uniques dessinees\n" +
         "  Grille " + cols + " x " + rows + " (" + seeds.length + " graines actives)\n\n" +
-        "  Detection: " + (boundsMethod === "frame" ? "CADRE DETECTE (plus grand rectangle ferme)" : "FALLBACK (bounding box globale)") + "\n" +
-        "  Stroke inset applique: " + inset.toFixed(2) + " pt\n" +
+        "  Detection: " + (boundsMethod === "frame"
+            ? "CADRE DETECTE (" + (frameResult ? frameResult.typename : "?") + ")"
+            : "FALLBACK (bounding box globale)") + "\n" +
+        "  Clip: " + (frameResult && frameResult.item ? "DUPLIQUE du cadre reel" : "rectangle de secours") + "\n" +
         "  Bounds dessin: [" + Math.round(drawBounds.xMin) + ", " + Math.round(drawBounds.yMin) +
                          ", " + Math.round(drawBounds.xMax) + ", " + Math.round(drawBounds.yMax) + "]\n" +
         "  Artboard:      [" + Math.round(abXMin) + ", " + Math.round(abYMin) +
@@ -399,20 +400,14 @@ function getDrawingBounds(doc) {
 // Detect the drawing frame: find the largest CLOSED pathItem
 // in the document (excluding the Craquelures layer).
 //
-// Strategy:
-//  - Walk all layers/sublayers/groups recursively
-//  - For each closed, visible pathItem, compute bounding box area
-//  - The largest one is almost certainly the illustration frame
-//  - Require it covers at least 30% of the artboard (safety check)
-//
-// Returns {xMin, yMin, xMax, yMax, strokeInset} or null if not found.
-// strokeInset = strokeWidth/2 of the detected frame path, so the
-// caller can shrink the bounds to the INSIDE edge of the stroke.
+// Uses visibleBounds (outer edge of stroke) for the clip region.
+// Returns { bounds:{xMin,yMin,xMax,yMax}, item, typename } or null.
 // ============================================================
 function detectFrameRect(doc) {
     var bestArea = 0;
     var bestBounds = null;
-    var bestStrokeWidth = 0;
+    var bestItem = null;
+    var bestTypename = null;
 
     // Artboard area for the 30% threshold check
     var ab   = doc.artboards[doc.artboards.getActiveArtboardIndex()];
@@ -425,38 +420,32 @@ function detectFrameRect(doc) {
         if (p.hidden) return;
         if (!p.closed) return;
 
-        var gb = p.geometricBounds;
-        var left   = Math.min(gb[0], gb[2]);
-        var right  = Math.max(gb[0], gb[2]);
-        var top    = Math.max(gb[1], gb[3]);
-        var bottom = Math.min(gb[1], gb[3]);
+        // Use visibleBounds — outer edge of stroke, what you actually see
+        var vb;
+        try { vb = p.visibleBounds; } catch(e) { vb = p.geometricBounds; }
 
-        var w = right - left;
-        var h = top - bottom;
-        var area = w * h;
+        var left   = Math.min(vb[0], vb[2]);
+        var right  = Math.max(vb[0], vb[2]);
+        var top    = Math.max(vb[1], vb[3]);
+        var bottom = Math.min(vb[1], vb[3]);
+
+        var area = (right - left) * (top - bottom);
 
         if (area > bestArea) {
-            bestArea = area;
-            // Read the stroke width to inset later
-            var sw = 0;
-            try { if (p.stroked) sw = p.strokeWidth; } catch(e) {}
-            bestStrokeWidth = sw;
-            bestBounds = { xMin: left, xMax: right, yMin: bottom, yMax: top };
+            bestArea     = area;
+            bestItem     = p;
+            bestTypename = p.typename;
+            bestBounds   = { xMin: left, xMax: right, yMin: bottom, yMax: top };
         }
     }
 
     function walkItems(container) {
-        // Walk pathItems
         for (var i = 0; i < container.pathItems.length; i++) {
             checkPath(container.pathItems[i]);
         }
-
-        // Walk groups
         for (var g = 0; g < container.groupItems.length; g++) {
             walkItems(container.groupItems[g]);
         }
-
-        // Walk compound paths (their pathItems)
         for (var c = 0; c < container.compoundPathItems.length; c++) {
             var cp = container.compoundPathItems[c];
             if (cp.hidden) continue;
@@ -466,32 +455,22 @@ function detectFrameRect(doc) {
         }
     }
 
-    for (var li = 0; li < doc.layers.length; li++) {
-        var lay = doc.layers[li];
-        if (lay.name === LAYER_NAME) continue;
-        if (!lay.visible) continue;
-
+    function walkLayer(lay) {
+        if (lay.name === LAYER_NAME) return;
+        if (!lay.visible) return;
         walkItems(lay);
-
-        // Also recurse sublayers
         for (var si = 0; si < lay.layers.length; si++) {
-            walkSubLayer(lay.layers[si]);
+            walkLayer(lay.layers[si]);
         }
     }
 
-    function walkSubLayer(subLay) {
-        if (subLay.name === LAYER_NAME) return;
-        if (!subLay.visible) return;
-        walkItems(subLay);
-        for (var si = 0; si < subLay.layers.length; si++) {
-            walkSubLayer(subLay.layers[si]);
-        }
+    for (var li = 0; li < doc.layers.length; li++) {
+        walkLayer(doc.layers[li]);
     }
 
-    // Safety: the frame should cover at least 30% of the artboard
+    // Safety: frame must cover at least 30% of artboard
     if (bestBounds && bestArea >= abArea * 0.30) {
-        bestBounds.strokeInset = bestStrokeWidth / 2;
-        return bestBounds;
+        return { bounds: bestBounds, item: bestItem, typename: bestTypename };
     }
 
     return null;
