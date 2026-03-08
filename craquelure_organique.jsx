@@ -73,7 +73,8 @@ function main() {
         }
     }
     if (bottomLayer !== null) {
-        craqLayer.move(bottomLayer, ElementPlacement.PLACEAFTER);
+        // ElementPlacement.PLACEAFTER = 4
+        craqLayer.move(bottomLayer, 4);
     }
 
     // Vider le layer avant régénération pour éviter l'accumulation
@@ -172,14 +173,14 @@ function main() {
             sp.anchor         = [pi.x, pi.y];
             sp.leftDirection  = [pi.x, pi.y];   // pas de courbe en amont
             sp.rightDirection = [cp1x, cp1y];
-            sp.pointType      = PointType.CORNER;
+            sp.pointType      = PointType.CORNER; // = 1, noeud sans tangentes continues
 
             // Ancre d'arrivée
             var ep = path.pathPoints.add();
             ep.anchor         = [pj.x, pj.y];
             ep.leftDirection  = [cp2x, cp2y];
             ep.rightDirection = [pj.x, pj.y];   // pas de courbe en aval
-            ep.pointType      = PointType.CORNER;
+            ep.pointType      = PointType.CORNER; // = 1
 
             pathCount++;
         }
