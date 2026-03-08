@@ -63,7 +63,7 @@ function main() {
         craqLayer = doc.layers.add();
         craqLayer.name = LAYER_NAME;
     }
-    craqLayer.zOrder(ZOrderMethod.SENDTOBACK);
+    craqLayer.zOrder(ZOrderMethod.BRINGTOFRONT);
 
     var wasLocked  = craqLayer.locked;
     var wasVisible = craqLayer.visible;
