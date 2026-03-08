@@ -1,12 +1,14 @@
 // =============================================================
-// craquelure_organique.jsx  –  v11  (True clip mask)
+// craquelure_organique.jsx  –  v12  (Clip mask via setEntirePath copy)
 //
-// v11 changes:
-//  - detectFrameRect() now returns the actual pathItem object
-//  - Bounds computed from visibleBounds (includes stroke visually)
-//  - Clip mask = duplicate of the REAL frame pathItem, not a
-//    hand-crafted rectangle. Pixel-perfect alignment guaranteed.
+// v12 changes:
+//  - Instead of duplicate() (unreliable target placement), we
+//    create a new pathItem directly in the group via
+//    grp.pathItems.add(), copy geometry via setEntirePath from
+//    the detected frame path, then move it to front.
+//    This guarantees the clip shape is INSIDE the group.
 //
+// v11: duplicate(grp) — worked in panel but clip wasn't inside grp
 // v10: strokeWidth/2 inset on reconstructed clip rect
 // v9:  grp.clipped = true with hand-crafted clip rect
 // v8:  detectFrameRect() + fallback to getDrawingBounds()
@@ -283,32 +285,37 @@ function main() {
     }
 
     // ============================================================
-    // PHASE 3: Native Illustrator clip mask using the REAL frame
-    // pathItem (duplicated into the group as frontmost element).
-    // This is pixel-perfect — no hand-crafted rectangle needed.
+    // PHASE 3: Native Illustrator clip mask.
+    // We create the clip path INSIDE the group via grp.pathItems.add(),
+    // copy geometry from the detected frame via setEntirePath(),
+    // then bring it to front. This is the only reliable way to
+    // guarantee the clip shape is the frontmost item in the group.
     // ============================================================
+    var clipShape = grp.pathItems.add();
+    clipShape.stroked = false;
+    clipShape.filled  = false;
+    clipShape.closed  = true;
+
     if (frameResult && frameResult.item) {
-        // Duplicate the actual frame path into the group, then bring to front
-        var clipShape = frameResult.item.duplicate(grp);
-        clipShape.stroked = false;
-        clipShape.filled  = false;
-        clipShape.zOrder(ZOrderMethod.BRINGTOFRONT);
-        clipShape.clippingPath = true;
+        // Copy exact geometry from the real frame path
+        var srcPts = frameResult.item.pathPoints;
+        var copyPts = [];
+        for (var cpi = 0; cpi < srcPts.length; cpi++) {
+            copyPts.push(srcPts[cpi].anchor);
+        }
+        clipShape.setEntirePath(copyPts);
     } else {
-        // Fallback: build a rectangle from computed bounds
-        var clipRect = grp.pathItems.add();
-        clipRect.stroked = false;
-        clipRect.filled  = false;
-        clipRect.setEntirePath([
+        // Fallback: rectangle from computed bounds
+        clipShape.setEntirePath([
             [xMin, yMax],
             [xMax, yMax],
             [xMax, yMin],
             [xMin, yMin]
         ]);
-        clipRect.closed = true;
-        clipRect.clippingPath = true;
-        clipRect.zOrder(ZOrderMethod.BRINGTOFRONT);
     }
+
+    clipShape.zOrder(ZOrderMethod.BRINGTOFRONT);
+    clipShape.clippingPath = true;
     grp.clipped = true;
 
     craqLayer.locked  = wasLocked;
@@ -320,7 +327,7 @@ function main() {
     }
 
     alert(
-        "Craquelures v11 generees !\n\n" +
+        "Craquelures v12 generees !\n\n" +
         "  " + cellCount + " cellules\n" +
         "  " + edgeCount + " aretes uniques dessinees\n" +
         "  Grille " + cols + " x " + rows + " (" + seeds.length + " graines actives)\n\n" +
